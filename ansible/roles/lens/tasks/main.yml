@@ -43,14 +43,9 @@
     - "{{ matomo_root }}"
     - "{{ matomo_db }}"
 
-
 # =========================
 # Network
 # =========================
-
-- name: Get system's IP address
-  set_fact:
-    system_ip: "{{ ansible_default_ipv4.address }}"
 
 - community.docker.docker_network:
     name: "{{ lens_network }}"

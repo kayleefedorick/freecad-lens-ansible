@@ -1,9 +1,5 @@
 # roles/nginx/tasks/main.yml
 
-- name: Get system's IP address
-  set_fact:
-    system_ip: "{{ ansible_default_ipv4.address }}"
-
 - name: Ensure lens_net exists (Docker)
   community.docker.docker_network:
     name: lens_net
