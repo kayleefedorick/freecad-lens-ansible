@@ -1,0 +1,4 @@
+nginx_image: docker.io/library/nginx:stable
+nginx_container_name: nginx
+nginx_http_port: 80
+nginx_https_port: 443

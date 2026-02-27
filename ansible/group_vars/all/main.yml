@@ -1,0 +1,6 @@
+container_engine: podman
+data_root: /srv/containers
+domains:
+  lens: "{{ vault_lens_domain }}"
+  lensapi: "{{ vault_lensapi_domain }}"
+  matomo: "{{ vault_matomo_domain }}"

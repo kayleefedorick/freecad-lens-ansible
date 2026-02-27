@@ -1,0 +1,426 @@
+# roles/lens/tasks/main.yml
+
+# =========================
+# Paths
+# =========================
+
+- name: Define paths
+  set_fact:
+    lens_root: "{{ data_root }}/lens"
+    lens_uploads: "{{ data_root }}/lens/uploads"
+    lens_mongo: "{{ data_root }}/lens/mongodb"
+    lens_redis: "{{ data_root }}/lens/redis"
+    lens_frontend_nginx: "{{ data_root }}/lens_frontend_nginx"
+    matomo_root: "{{ data_root }}/matomo"
+    matomo_db: "{{ data_root }}/matomo/db"
+
+# =========================
+# Directories
+# =========================
+
+- name: Create Lens directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: 568
+    group: 568
+    mode: "0775"
+  loop:
+    - "{{ lens_root }}"
+    - "{{ lens_uploads }}"
+    - "{{ lens_mongo }}"
+    - "{{ lens_redis }}"
+    - "{{ lens_frontend_nginx }}"
+
+- name: Create Matomo directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: 33
+    group: 33
+    mode: "0775"
+  loop:
+    - "{{ matomo_root }}"
+    - "{{ matomo_db }}"
+
+
+# =========================
+# Network
+# =========================
+
+- name: Get system's IP address
+  set_fact:
+    system_ip: "{{ ansible_default_ipv4.address }}"
+
+- community.docker.docker_network:
+    name: "{{ lens_network }}"
+  when: container_engine == "docker"
+
+- containers.podman.podman_network:
+    name: "{{ lens_network }}"
+  when: container_engine == "podman"
+
+# =========================
+# Matomo Database
+# =========================
+
+- name: Matomo DB (Docker)
+  community.docker.docker_container:
+    name: matomo-db
+    image: "{{ matomo_db_image }}"
+    restart_policy: always
+    networks:
+      - name: "{{ lens_network }}"
+    env:
+      MYSQL_ROOT_PASSWORD: "{{ vault_matomo_password }}"
+      MYSQL_DATABASE: "{{ matomo_db_name }}"
+      MYSQL_USER: "{{ matomo_db_user }}"
+      MYSQL_PASSWORD: "{{ matomo_db_password }}"
+    volumes:
+      - "{{ matomo_db }}:/var/lib/mysql:Z"
+  when: container_engine == "docker"
+
+- name: Matomo DB (Podman)
+  containers.podman.podman_container:
+    name: matomo-db
+    image: "{{ matomo_db_image }}"
+    restart_policy: always
+    network: "{{ lens_network }}"
+    env:
+      MYSQL_ROOT_PASSWORD: "{{ vault_matomo_password }}"
+      MYSQL_DATABASE: "{{ matomo_db_name }}"
+      MYSQL_USER: "{{ matomo_db_user }}"
+      MYSQL_PASSWORD: "{{ matomo_db_password }}"
+    volume:
+      - "{{ matomo_db }}:/var/lib/mysql:Z"
+  when: container_engine == "podman"
+
+# =========================
+# Matomo App
+# =========================
+
+- name: Matomo (Docker)
+  community.docker.docker_container:
+    name: matomo
+    image: "{{ matomo_image }}"
+    restart_policy: always
+    networks:
+      - name: "{{ lens_network }}"
+    env:
+      MATOMO_DATABASE_HOST: matomo-db
+      MATOMO_DATABASE_ADAPTER: mysql
+      MATOMO_DATABASE_TABLES_PREFIX: matomo_
+      MATOMO_DATABASE_USERNAME: "{{ matomo_db_user }}"
+      MATOMO_DATABASE_PASSWORD: "{{ matomo_db_password }}"
+      MATOMO_DATABASE_DBNAME: "{{ matomo_db_name }}"
+      MATOMO_ADMIN_LOGIN: "{{ vault_matomo_username }}"
+      MATOMO_ADMIN_PASSWORD: "{{ vault_matomo_password }}"
+      MATOMO_ADMIN_EMAIL: "{{ vault_matomo_email }}"
+    volumes:
+      - "{{ matomo_root }}:/var/www/html:Z"
+  when: container_engine == "docker"
+
+- name: Matomo (Podman)
+  containers.podman.podman_container:
+    name: matomo
+    image: "{{ matomo_image }}"
+    restart_policy: always
+    network: "{{ lens_network }}"
+    env:
+      MATOMO_DATABASE_HOST: matomo-db
+      MATOMO_DATABASE_ADAPTER: mysql
+      MATOMO_DATABASE_TABLES_PREFIX: matomo_
+      MATOMO_DATABASE_USERNAME: "{{ matomo_db_user }}"
+      MATOMO_DATABASE_PASSWORD: "{{ matomo_db_password }}"
+      MATOMO_DATABASE_DBNAME: "{{ matomo_db_name }}"
+      MATOMO_ADMIN_LOGIN: "{{ vault_matomo_username }}"
+      MATOMO_ADMIN_PASSWORD: "{{ vault_matomo_password }}"
+      MATOMO_ADMIN_EMAIL: "{{ vault_matomo_email }}"
+    volume:
+      - "{{ matomo_root }}:/var/www/html:Z"
+  when: container_engine == "podman"
+
+# =========================
+# Upload Lens bootstrap
+# =========================
+
+- name: Check uploads initialized
+  stat:
+    path: "{{ lens_uploads }}/.initialized"
+  register: uploads_init
+
+- name: Populate uploads (Docker)
+  community.docker.docker_container:
+    name: lens-bootstrap
+    image: "{{ lens_backend_image }}"
+    command: >
+      sh -c "cp -r /app/uploads/* /data &&
+             touch /data/.initialized"
+    auto_remove: true
+    volumes:
+      - "{{ lens_uploads }}:/data:Z"
+  when:
+    - container_engine == "docker"
+    - not uploads_init.stat.exists
+
+- name: Populate uploads (Podman)
+  containers.podman.podman_container:
+    name: lens-bootstrap
+    image: "{{ lens_backend_image }}"
+    command: >
+      sh -c "cp -r /app/uploads/* /data &&
+             touch /data/.initialized"
+    rm: true
+    volume:
+      - "{{ lens_uploads }}:/data:Z"
+  when:
+    - container_engine == "podman"
+    - not uploads_init.stat.exists
+
+# =========================
+# MongoDB
+# =========================
+
+- name: Mongo (Docker)
+  community.docker.docker_container:
+    name: lens-mongo
+    image: "{{ lens_mongo_image }}"
+    user: "568:568"
+    restart_policy: always
+    networks:
+      - name: "{{ lens_network }}"
+    env:
+      MONGO_INITDB_DATABASE: lens
+      MONGO_INITDB_ROOT_USERNAME: lens
+      MONGO_INITDB_ROOT_PASSWORD: "{{ vault_lens_db_password }}"
+    volumes:
+      - "{{ lens_mongo }}:/data/db:Z"
+  when: container_engine == "docker"
+
+- name: Mongo (Podman)
+  containers.podman.podman_container:
+    name: lens-mongo
+    image: "{{ lens_mongo_image }}"
+    user: "568:568"
+    restart_policy: always
+    network: "{{ lens_network }}"
+    volume:
+      - "{{ lens_mongo }}:/data/db:Z"
+    env:
+      MONGO_INITDB_DATABASE: lens
+      MONGO_INITDB_ROOT_USERNAME: lens
+      MONGO_INITDB_ROOT_PASSWORD: "{{ vault_lens_db_password }}"
+  when: container_engine == "podman"
+
+# =========================
+# Redis
+# =========================
+
+- name: Redis (Docker)
+  community.docker.docker_container:
+    name: lens-redis
+    image: "{{ lens_redis_image }}"
+    command:
+      - "--requirepass"
+      - "{{ vault_lens_redis_password }}"
+      - "--port"
+      - "{{ lens_redis_port }}"
+    user: "568:568"
+    restart_policy: always
+    networks:
+      - name: "{{ lens_network }}"
+    volumes:
+      - "{{ lens_redis }}:/data:Z"
+  when: container_engine == "docker"
+
+- name: Redis (Podman)
+  containers.podman.podman_container:
+    name: lens-redis
+    image: "{{ lens_redis_image }}"
+    command:
+      - "--requirepass"
+      - "{{ vault_lens_redis_password }}"
+      - "--port"
+      - "{{ lens_redis_port }}"
+    user: "568:568"
+    restart_policy: always
+    network: "{{ lens_network }}"
+    volume:
+      - "{{ lens_redis }}:/data:Z"
+  when: container_engine == "podman"
+
+# =========================
+# Backend
+# =========================
+
+- name: Backend (Docker)
+  community.docker.docker_container:
+    name: "{{ lens_hostname }}"
+    image: "{{ lens_backend_image }}"
+    restart_policy: always
+    networks:
+      - name: "{{ lens_network }}"
+    volumes:
+      - "{{ lens_uploads }}:/app/uploads:Z"
+    env:
+      PORT: "{{ lens_backend_port }}"
+      HOSTNAME: "{{ lens_hostname }}"
+      DB_URL: "mongodb://lens:{{ vault_lens_db_password }}@lens-mongo:{{ lens_mongo_port }}/lens?authSource=admin"
+      DEFAULT_ADMIN_EMAIL: "{{ vault_lens_admin_email }}"
+      DEFAULT_ADMIN_NAME: "{{ vault_lens_admin_name }}"
+      DEFAULT_ADMIN_PASSWORD: "{{ vault_lens_admin_password }}"
+      DEFAULT_ADMIN_USERNAME: "{{ vault_lens_admin_username }}"
+      FC_WORKER_URL: "http://lens-api:{{ lens_api_port }}/2015-03-31/functions/function/invocations"
+      VITE_APP_API_URL: "{{ lens_public_api_url }}"
+      FRONTEND_URL: "https://{{ vault_lens_domain }}"
+      SMTP_HOST: "{{ vault_lens_smtp_host }}"
+      SMTP_PORT: "{{ vault_lens_smtp_port }}"
+      SMTP_USER: "{{ vault_lens_smtp_user }}"
+      SMTP_PASS: "{{ vault_lens_smtp_pass }}"
+      SMTP_FROM: "{{ vault_lens_smtp_from }}"
+      VITE_MATOMO_URL: "https://{{ vault_matomo_domain }}"
+      VITE_MATOMO_SITE: "1"
+  when: container_engine == "docker"
+
+- name: Backend (Podman)
+  containers.podman.podman_container:
+    name: "{{ lens_hostname }}"
+    image: "{{ lens_backend_image }}"
+    restart_policy: always
+    network: "{{ lens_network }}"
+    volume:
+      - "{{ lens_uploads }}:/app/uploads:Z"
+    env:
+      PORT: "{{ lens_backend_port }}"
+      HOSTNAME: "{{ lens_hostname }}"
+      DB_URL: "mongodb://lens:{{ vault_lens_db_password }}@lens-mongo:{{ lens_mongo_port }}/lens?authSource=admin"
+      DEFAULT_ADMIN_EMAIL: "{{ vault_lens_admin_email }}"
+      DEFAULT_ADMIN_NAME: "{{ vault_lens_admin_name }}"
+      DEFAULT_ADMIN_PASSWORD: "{{ vault_lens_admin_password }}"
+      DEFAULT_ADMIN_USERNAME: "{{ vault_lens_admin_username }}"
+      FC_WORKER_URL: "http://lens-api:{{ lens_api_port }}/2015-03-31/functions/function/invocations"
+      VITE_APP_API_URL: "{{ lens_public_api_url }}"
+      FRONTEND_URL: "https://{{ vault_lens_domain }}"
+      SMTP_HOST: "{{ vault_lens_smtp_host }}"
+      SMTP_PORT: "{{ vault_lens_smtp_port }}"
+      SMTP_USER: "{{ vault_lens_smtp_user }}"
+      SMTP_PASS: "{{ vault_lens_smtp_pass }}"
+      SMTP_FROM: "{{ vault_lens_smtp_from }}"
+      VITE_MATOMO_URL: "https://{{ vault_matomo_domain }}"
+      VITE_MATOMO_SITE: "1"
+  when: container_engine == "podman"
+
+# =========================
+# API Worker
+# =========================
+
+- name: API worker
+  community.docker.docker_container:
+    name: lens-api
+    image: "{{ lens_api_image }}"
+    restart_policy: always
+    networks:
+      - name: "{{ lens_network }}"
+    user: "568:568"
+    env:
+      REDIS_HOST: lens-redis
+      REDIS_PORT: "{{ lens_redis_port }}"
+      REDIS_PASSWORD: "{{ vault_lens_redis_password }}"
+  when: container_engine == "docker"
+
+- name: API worker (Podman)
+  containers.podman.podman_container:
+    name: lens-api
+    image: "{{ lens_api_image }}"
+    restart_policy: always
+    network: "{{ lens_network }}"
+    user: "568:568"
+    env:
+      REDIS_HOST: lens-redis
+      REDIS_PORT: "{{ lens_redis_port }}"
+      REDIS_PASSWORD: "{{ vault_lens_redis_password }}"
+  when: container_engine == "podman"
+
+# =========================
+# Celery
+# =========================
+
+- name: Celery worker (Docker)
+  community.docker.docker_container:
+    name: lens-celery
+    image: "{{ lens_celery_image }}"
+    restart_policy: always
+    networks:
+      - name: "{{ lens_network }}"
+    user: "568:568"
+    env:
+      BACKEND_URL: "{{ lens_public_api_url }}"
+      REDIS_HOST: lens-redis
+      REDIS_PORT: "{{ lens_redis_port }}"
+      REDIS_PASSWORD: "{{ vault_lens_redis_password }}"
+  when: container_engine == "docker"
+
+- name: Celery worker (Podman)
+  containers.podman.podman_container:
+    name: lens-celery
+    image: "{{ lens_celery_image }}"
+    restart_policy: always
+    network: "{{ lens_network }}"
+    user: "568:568"
+    env:
+      BACKEND_URL: "{{ lens_public_api_url }}"
+      REDIS_HOST: lens-redis
+      REDIS_PORT: "{{ lens_redis_port }}"
+      REDIS_PASSWORD: "{{ vault_lens_redis_password }}"
+  when: container_engine == "podman"
+
+# =========================
+# Frontend
+# =========================
+
+- name: Copy frontend nginx conf directory
+  ansible.builtin.copy:
+    src: conf/
+    dest: "{{ data_root }}/lens_frontend_nginx/"
+    mode: '0644'
+
+- name: Deploy frontend nginx config
+  template:
+    src: nginx.conf.j2
+    dest: "{{ data_root }}/lens_frontend_nginx/nginx.conf"
+    mode: "0644"
+
+- name: Frontend (Docker)
+  community.docker.docker_container:
+    name: lens-frontend
+    image: "{{ lens_frontend_image }}"
+    restart_policy: always
+    networks:
+      - name: "{{ lens_network }}"
+    volume:
+      - "{{ lens_frontend_nginx }}:/usr/local/openresty/nginx/conf:Z"
+    env:
+      PROXY_SCHEME_PREFIX: "{{ lens_proxy_scheme }}"
+      VITE_APP_API_URL: "{{ lens_public_api_url }}"
+      VITE_MATOMO_URL: "https://{{ vault_matomo_domain }}"
+      VITE_MATOMO_SITE: "1"
+      LUA_API_URL: "{{ vault_lensapi_domain }}"
+      RESOLVE_DNS: "1"
+  when: container_engine == "docker"
+
+- name: Frontend (Podman)
+  containers.podman.podman_container:
+    name: lens-frontend
+    image: "{{ lens_frontend_image }}"
+    restart_policy: always
+    network: "{{ lens_network }}"
+    volume:
+      - "{{ lens_frontend_nginx }}:/usr/local/openresty/nginx/conf:Z"
+    env:
+      PROXY_SCHEME_PREFIX: "{{ lens_proxy_scheme }}"
+      VITE_APP_API_URL: "{{ lens_public_api_url }}"
+      VITE_MATOMO_URL: "https://{{ vault_matomo_domain }}"
+      VITE_MATOMO_SITE: "1"
+      LUA_API_URL: "{{ vault_lensapi_domain }}"
+      RESOLVE_DNS: "1"
+  when: container_engine == "podman"

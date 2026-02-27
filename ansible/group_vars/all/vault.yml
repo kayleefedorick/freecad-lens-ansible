@@ -1,0 +1,29 @@
+# Do not store credentials as plain text!!!
+
+vault_lens_db_password: ""
+vault_lens_redis_password: ""
+vault_lens_admin_email: ""
+vault_lens_admin_password: ""
+vault_lens_admin_username: ""
+vault_lens_admin_name: ""
+
+vault_lens_domain: ""
+vault_lens_static_ip: ""
+
+vault_lens_smtp_host: ""
+vault_lens_smtp_port: ""
+vault_lens_smtp_user: ""
+vault_lens_smtp_pass: ""
+vault_lens_smtp_from: ""
+
+vault_lensapi_domain: ""
+
+vault_matomo_db_password: ""
+vault_matomo_username: ""
+vault_matomo_password: ""
+vault_matomo_email: ""
+vault_matomo_domain: ""
+
+# LetsEncrypt
+vault_cloudflare_api_token: ""
+vault_cloudflare_email: ""

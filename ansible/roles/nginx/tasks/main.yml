@@ -1,0 +1,96 @@
+# roles/nginx/tasks/main.yml
+
+- name: Get system's IP address
+  set_fact:
+    system_ip: "{{ ansible_default_ipv4.address }}"
+
+- name: Ensure lens_net exists (Docker)
+  community.docker.docker_network:
+    name: lens_net
+    state: present
+  when: container_engine == 'docker'
+
+- name: Ensure lens_net exists (Podman)
+  containers.podman.podman_network:
+    name: lens_net
+    state: present
+  when: container_engine == 'podman'
+
+- name: Ensure nginx config directory exists
+  file:
+    path: "{{ data_root }}/nginx/conf.d"
+    state: directory
+    mode: "0755"
+
+- name: Deploy lens nginx reverse proxy config
+  template:
+    src: lens.conf.j2
+    dest: "{{ data_root }}/nginx/conf.d/lens.conf"
+    mode: "0644"
+  notify: Restart nginx
+
+- name: Deploy lensapi nginx reverse proxy config
+  template:
+    src: lensapi.conf.j2
+    dest: "{{ data_root }}/nginx/conf.d/lensapi.conf"
+    mode: "0644"
+  notify: Restart nginx
+
+- name: Deploy matomo nginx reverse proxy config
+  template:
+    src: matomo.conf.j2
+    dest: "{{ data_root }}/nginx/conf.d/matomo.conf"
+    mode: "0644"
+  notify: Restart nginx
+
+- name: Run nginx reverse proxy (Docker)
+  community.docker.docker_container:
+    name: "{{ nginx_container_name }}"
+    image: "{{ nginx_image }}"
+    state: started
+    restart_policy: always
+    ports:
+      - "{{ nginx_http_port }}:80"
+      - "{{ nginx_https_port }}:443"
+    networks:
+      - name: nextcloud_net
+      - name: gitea_net
+      - name: phpldapadmin_net
+      - name: lens_net
+    volumes:
+      - "{{ data_root }}/nginx/conf.d:/etc/nginx/conf.d:Z"
+      - "{{ data_root }}/lens/certs:/etc/nginx/certs/lens:ro,z"
+      - "{{ data_root }}/lensapi/certs:/etc/nginx/certs/lensapi:ro,z"
+      - "{{ data_root }}/matomo/certs:/etc/nginx/certs/matomo:ro,z"
+    user: "0:0"
+  when: container_engine == 'docker'
+
+- name: Run nginx reverse proxy (Podman)
+  containers.podman.podman_container:
+    name: "{{ nginx_container_name }}"
+    image: "{{ nginx_image }}"
+    state: started
+    restart_policy: always
+    ports:
+      - "{{ nginx_http_port }}:80"
+      - "{{ nginx_https_port }}:443"
+    network: nextcloud_net,gitea_net,lens_net,phpldapadmin_net
+    volumes:
+      - "{{ data_root }}/nginx/conf.d:/etc/nginx/conf.d:Z"
+      - "{{ data_root }}/lens/certs:/etc/nginx/certs/lens:ro,z"
+      - "{{ data_root }}/lensapi/certs:/etc/nginx/certs/lensapi:ro,z"
+      - "{{ data_root }}/matomo/certs:/etc/nginx/certs/matomo:ro,z"
+    user: "0:0"
+  when: container_engine == 'podman'
+
+- name: Get nginx container info (Docker)
+  community.docker.docker_container_info:
+    name: "{{ nginx_container_name }}"
+  register: nginx_container_info
+  when: container_engine == 'docker'
+
+- name: Get nginx container info (Podman)
+  containers.podman.podman_container_info:
+    name: "{{ nginx_container_name }}"
+  register: nginx_container_info
+  when: container_engine == 'podman'

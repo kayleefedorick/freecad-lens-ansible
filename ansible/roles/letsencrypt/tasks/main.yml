@@ -1,0 +1,66 @@
+# roles/letsencrypt/tasks/main.yml
+
+- name: Install required packages
+  dnf:
+        name:
+          - certbot
+          - python3-certbot-dns-cloudflare
+        state: present
+
+- name: Create Cloudflare credentials file
+  copy:
+    dest: /root/.cloudflare.ini
+    content: |
+      dns_cloudflare_api_token = {{ vault_cloudflare_api_token }}
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Obtain Let's Encrypt certificates via Cloudflare DNS
+  command: >
+    certbot certonly
+    --dns-cloudflare
+    --dns-cloudflare-credentials /root/.cloudflare.ini
+    --dns-cloudflare-propagation-seconds 60
+    -d {{ item.value }}
+    --non-interactive
+    --agree-tos
+    --email {{ vault_cloudflare_email }}
+  loop: "{{ domains|dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Ensure certificates are readable for containers
+  file:
+    path: "/etc/letsencrypt/live/{{ item.value }}/fullchain.pem"
+    mode: '0644'
+  loop: "{{ domains|dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Create directories for container certs
+  file:
+    path: "{{ data_root }}/{{ item.key }}/certs"
+    state: directory
+    mode: '0755'
+  loop: "{{ domains|dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Copy certificates to container directories
+  copy:
+    src: "/etc/letsencrypt/live/{{ item.value }}/fullchain.pem"
+    dest: "{{ data_root }}/{{ item.key }}/certs/fullchain.pem"
+    remote_src: yes
+  loop: "{{ domains|dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Copy private key to container directories
+  copy:
+    src: "/etc/letsencrypt/live/{{ item.value }}/privkey.pem"
+    dest: "{{ data_root }}/{{ item.key }}/certs/privkey.pem"
+    remote_src: yes
+  loop: "{{ domains|dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"

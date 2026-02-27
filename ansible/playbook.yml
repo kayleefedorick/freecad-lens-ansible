@@ -1,0 +1,38 @@
+# playbook.yml
+- hosts: localhost
+  connection: local
+  become: true
+
+  vars_files:
+    - group_vars/all/vault.yml
+
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_mysql_python_library: PyMySQL
+
+  pre_tasks:
+    - name: Ensure Python 3 is installed
+      dnf:
+        name: python3
+        state: present
+
+    - name: Ensure Python 3 development tools are installed
+      dnf:
+        name:
+          - python3-devel
+          - gcc
+          - mariadb-connector-c-devel
+        state: present
+
+    - name: Ensure required Python packages for Ansible MySQL modules
+      pip:
+        name:
+          - mysqlclient
+          - PyMySQL
+        executable: pip3
+
+  roles:
+    - container_engine
+    - letsencrypt
+    - nginx
+    - lens

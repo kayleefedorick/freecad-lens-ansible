@@ -1,0 +1,41 @@
+# roles/container_engine/tasks/main.yml
+
+- name: Install fuse-overlayfs package
+  ansible.builtin.package:
+    name: fuse-overlayfs
+    state: present
+
+- name: Ensure containers config directory exists
+  ansible.builtin.file:
+    path: /etc/containers
+    state: directory
+    mode: '0755'
+
+- name: Configure Podman to use fuse-overlayfs storage driver in storage.conf
+  ansible.builtin.copy:
+    content: |
+      [storage]
+      driver = "overlay"
+      [storage.options.overlay]
+      mount_program = "/usr/bin/fuse-overlayfs"
+      mountopt = "nodev,metacopy=on"
+    dest: /etc/containers/storage.conf
+    mode: '0644'
+
+- name: Configure Podman to use cgroupfs cgroup manager
+  ansible.builtin.copy:
+    content: |
+      cgroup_manager = "cgroupfs"
+    dest: /etc/containers/libpod.conf
+    mode: '0644'
+
+- name: Install container engine
+  package:
+    name: "{{ 'docker.io' if container_engine == 'docker' else 'podman' }}"
+    state: present
+
+- name: Ensure container service running
+  service:
+    name: "{{ 'docker' if container_engine == 'docker' else 'podman' }}"
+    state: started
+    enabled: true

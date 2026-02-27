@@ -1,0 +1,402 @@
+# SPDX-FileCopyrightText: 2024 Ondsel <development@ondsel.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# user  root;
+
+env LUA_API_URL;
+env S3_BUCKET_URL;
+env PROXY_SCHEME_PREFIX;
+env RESOLVE_DNS;
+
+worker_processes  1;
+error_log /var/log/nginx_debug.log debug;
+error_log  /var/log/nginx_error.log warn;
+pid        /var/run/nginx.pid;
+
+events {
+  worker_connections  1024;
+}
+
+http {
+  include       mime.types;
+  default_type  application/octet-stream;
+
+  log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+
+  access_log  /var/log/nginx_access.log  main;
+
+  lua_shared_dict my_cache 50m;  # Shared memory for caching with 50 MB size
+
+  sendfile        on;
+  keepalive_timeout  65;
+
+  server {
+    listen       80;
+    server_name  localhost;
+
+    location / {
+      root   /app;
+      index  index.html;
+      try_files $uri $uri/ /index.html;
+    }
+
+    location ~ ^/(share|model)(/)?$ {
+      root   /app;
+      index  index.html;
+      try_files /index.html $uri $uri/;
+    }
+
+    location ~ /public/(.+) {
+      root   /app;
+      resolver {{ lens_resolver }};
+      proxy_http_version     1.1;
+      proxy_redirect         off;
+      proxy_set_header       Connection "";
+      proxy_set_header       Authorization '';
+      proxy_set_header       X-Real-IP $remote_addr;
+      proxy_set_header       X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_hide_header      x-amz-id-2;
+      proxy_hide_header      x-amz-request-id;
+      proxy_hide_header      x-amz-meta-server-side-encryption;
+      proxy_hide_header      x-amz-server-side-encryption;
+      proxy_hide_header      Set-Cookie;
+      proxy_ignore_headers   Set-Cookie;
+      proxy_intercept_errors on;
+      add_header             Cache-Control max-age=31536000;
+      set $final_proxy_url "";
+      access_by_lua_block {
+        local success, pcallErr = pcall(
+          function()
+            local proxy_address = os.getenv("S3_BUCKET_URL")
+            local uri = ngx.var.request_uri
+            ngx.var.final_proxy_url = proxy_address .. uri
+          end
+        )
+        if not success then
+          ngx.log(ngx.ERR, pcallErr)
+        end
+      }
+      proxy_pass             $final_proxy_url;
+    }
+
+    location ~ ^/(sitemap.xml|users-sitemap.xml|sharelinks-sitemap.xml|robots.txt)$ {
+      resolver {{ lens_resolver }};
+      content_by_lua_block {
+        local http = require("resty.http")
+        local cjson = require("cjson")
+        local uri = ngx.var.uri
+
+        -- Determine the content type and S3 path based on the requested file
+        local content_type
+        local s3_path
+        if uri == "/robots.txt" then
+          content_type = "text/plain"
+          s3_path = "/sitemaps/robots.txt"
+        else
+          content_type = "application/xml"
+          s3_path = uri:gsub("^/", "/sitemaps/")
+        end
+
+        local s3_url = os.getenv("S3_BUCKET_URL") .. s3_path
+
+        local cache_key = uri
+        local cache = ngx.shared.my_cache
+        local res = cache:get(cache_key)
+
+        if not res then
+          local httpc = http.new()
+          httpc:set_timeouts(5000, 5000, 5000)  -- set timeouts for connect/send/read
+          local resp, err = httpc:request_uri(s3_url, {
+            method = "GET",
+            headers = {
+              ["Accept"] = content_type,
+            },
+            ssl_verify = false,
+            resolver = "{{ lens_resolver }}"
+          })
+
+          if not resp then
+            ngx.status = ngx.HTTP_INTERNAL_SERVER_ERROR
+            ngx.say("failed to request: ", err)
+            return
+          end
+
+          if resp.status ~= 200 then
+            ngx.status = resp.status
+            ngx.say("failed to get response: ", resp.body)
+            return
+          end
+
+          res = resp.body
+          cache:set(cache_key, res, 3600)  -- Cache for 1 hr
+        end
+
+        ngx.header.content_type = content_type
+        ngx.say(res)
+      }
+    }
+
+    # Specific location block for the .wasm file
+    location ~ /share/occt-import-js.wasm {
+      root /app;
+    }
+
+    location ~ ^/share/([0-9a-zA-Z]+)/download$ {
+      resolver {{ lens_resolver }};  # Use a public DNS resolver for name resolution
+      # Proxy settings to call the backend service
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header Host $host;
+      set $backend_url "";
+      set $prefix "";
+
+      # Set ENV variable value
+      set_by_lua $backend_url 'return os.getenv("LUA_API_URL")';
+      set_by_lua $prefix 'return os.getenv("PROXY_SCHEME_PREFIX")';
+
+      set $download_url "$prefix$backend_url/shared-models/$1/download";
+
+      # Call the backend and pass the response to the client
+      proxy_pass $download_url;
+    }
+
+    location ~ ^/publisher/([0-9a-zA-Z]+)/download/(.+)$ {
+      resolver {{ lens_resolver }};  # Use a public DNS resolver for name resolution
+      # resolver 127.0.0.11; # use this resolver for docker-compose scenarios
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header Host $host;
+      set $backend_url "";
+      set $prefix "";
+
+      # Set ENV variable value
+      set_by_lua $backend_url 'return os.getenv("LUA_API_URL")';
+      set_by_lua $prefix 'return os.getenv("PROXY_SCHEME_PREFIX")';
+
+      set $download_url "$prefix$backend_url/publisher/$1/download/$2";
+
+      # Call the backend and pass the response to the client
+      proxy_pass $download_url;
+    }
+
+    location ~ ^/org/[^/]+/workspace/[^/]+/file/([0-9a-zA-Z]+)/download$ {
+      resolver {{ lens_resolver }};  # Use a public DNS resolver for name resolution
+      # Proxy settings to call the backend service
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header Host $host;
+      set $backend_url "";
+      set $prefix "";
+
+      # Set ENV variable value
+      set_by_lua $backend_url 'return os.getenv("LUA_API_URL")';
+      set_by_lua $prefix 'return os.getenv("PROXY_SCHEME_PREFIX")';
+
+      set $download_url "$prefix$backend_url/file/$1/download";
+
+      # Call the backend and pass the response to the client
+      proxy_pass $download_url;
+    }
+
+    location ~ ^/download/([^/]+)(/[^/]+)(/[^/]+)?$ {
+      resolver {{ lens_resolver }};  # Use a public DNS resolver for name resolution
+      # Proxy settings to call the backend service
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header Host $host;
+      set $backend_url "";
+      set $prefix "";
+
+      # Set ENV variable value
+      set_by_lua $backend_url 'return os.getenv("LUA_API_URL")';
+      set_by_lua $prefix 'return os.getenv("PROXY_SCHEME_PREFIX")';
+
+      set $download_url "$prefix$backend_url/download/file/$1$2";
+
+      # Call the backend and pass the response to the client
+      proxy_pass $download_url;
+    }
+
+    location ~ /share/([0-9a-z]+) {
+      root /app;
+      index index.html;
+      try_files /index.html /index.html;
+      set $description "";
+      set $og_title "Shared model";
+      set_by_lua $prefix 'return os.getenv("PROXY_SCHEME_PREFIX")';
+      set $og_thumbnail "$prefix$http_host/logo.svg";
+      set $tags "";
+      set $og_url "";
+      set $og_host "";
+      set $author_name "";
+      set $author_url "";
+      set $org_name "";
+      set $org_url "";
+      set $date_published "";
+      set $date_modified "";
+      access_by_lua_block {
+        local success, pcallErr = pcall(
+          function()
+            local http = require("resty.http")
+            local cjson = require("cjson")
+            local resolver = require("resty.resolver")
+            local httpc = http.new()
+            local id = ngx.var.request_uri
+            local api = os.getenv("LUA_API_URL")
+            local proxySchemePrefix = os.getenv("PROXY_SCHEME_PREFIX")
+            local resolve_dns = os.getenv("RESOLVE_DNS")
+
+            ngx.var.og_url = proxySchemePrefix .. ngx.var.http_host .. ngx.var.request_uri;
+            ngx.var.og_host = proxySchemePrefix .. ngx.var.http_host;
+
+            if resolve_dns == "1" then
+              local r, err = resolver:new{
+                nameservers = { "{{ lens_resolver }}" }
+              }
+              if not r then
+                error("failed to instantiate resolver: " .. err)
+              end
+              local ans, err = r:tcp_query(api, { qtype = r.TYPE_A })
+              if not ans then
+                error("failed to query: " .. err)
+              end
+              local ip_address = nil
+              for _, entry in ipairs(ans) do
+                  if entry.type == 1 and entry.address then
+                      ip_address = entry.address
+                      break
+                  end
+              end
+              if not ip_address then
+                  error("Not able to resolve domain")
+              end
+              api = "http://" .. ip_address
+            end
+
+            local lastSlashIndex = string.find(id, "/[^/]*$")
+            local shareModelId = string.sub(id, lastSlashIndex + 1)
+
+            local res, err = httpc:request_uri(api .. "/shared-models/" .. shareModelId .. '?additionalData=true', {
+                method = "GET"
+            })
+            if not res then
+              error("Failed to request API: " .. err)
+            elseif res.status ~= 200 then
+              error("API returned non-200 status code: " .. res.status)
+            else
+              local data = cjson.decode(res.body)
+              ngx.var.og_title = data.title
+              lastSlashIndex = string.find(data.thumbnailUrl, "/public/[^/]*$")
+              local s3uri = string.sub(data.thumbnailUrl, lastSlashIndex + 1)
+              ngx.var.og_thumbnail = proxySchemePrefix .. ngx.var.http_host .. "/" .. s3uri
+              ngx.var.description = data.description
+
+              if data.curation and data.curation.keywordRefs then
+                local keywords = data.curation.keywordRefs
+                ngx.var.tags = table.concat(keywords, ", ")
+              end
+
+
+              if data.additionalData then
+                ngx.var.date_published = data.additionalData.datePublished
+                ngx.var.date_modified = data.additionalData.dateModified
+                if data.additionalData.author then
+                  ngx.var.author_name = data.additionalData.author.name
+                  ngx.var.author_url = proxySchemePrefix .. ngx.var.http_host .. "/user/" .. data.additionalData.author.username
+                end
+                if data.additionalData.organization then
+                  if data.additionalData.organization.type == "Personal" then
+                    ngx.var.org_name = data.additionalData.organization.owner.name
+                    ngx.var.org_url = proxySchemePrefix .. ngx.var.http_host .. "/user/" .. data.additionalData.organization.owner.username
+                  elseif data.additionalData.organization.type == "Admin" then
+                    ngx.var.org_name = data.additionalData.organization.name
+                    ngx.var.org_url = proxySchemePrefix .. ngx.var.http_host
+                  else
+                    ngx.var.org_name = data.additionalData.organization.name
+                    ngx.var.org_url = proxySchemePrefix .. ngx.var.http_host .. "/org/" .. data.additionalData.organization.refName
+                  end
+                end
+              end
+            end
+          end
+        )
+        if not success then
+          ngx.log(ngx.ERR, pcallErr)
+        end
+      }
+
+      set $og_url $http_host$request_uri;
+      set $og_host $http_host;
+      add_header 'X-Frame-Options' 'ALLOW-FROM *' always;
+      sub_filter '<title>Lens</title>' '<title>$og_title</title>';
+      sub_filter '</head>' '
+
+  <meta name="description" content="$description" />
+  <meta name="keywords" content="$tags" />
+  <meta name="robots" content="index, follow" />
+
+  <!-- OpenGraph protocol Meta tags -->
+  <meta property="og:title" content="$og_title" />
+  <meta property="og:description" content="3D Mesh Model" />
+  <meta property="og:image" content="$og_thumbnail" />
+  <meta property="og:image:secure_url" content="$og_thumbnail" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="400" />
+  <meta property="og:image:height" content="300" />
+  <meta property="og:image:alt" content="$og_title" />
+
+  <!-- Twitter Meta tags -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta property="twitter:domain" content="$og_host">
+  <meta property="twitter:url" content="$og_url">
+  <meta name="twitter:title" content="$og_title">
+  <meta name="twitter:description" content="3D Mesh Model">
+  <meta name="twitter:image" content="$og_thumbnail">
+
+  <!-- Structured Data (Schema Markup) -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "NewsArticle",
+    "headline": "Share Link page: $og_title",
+    "description": "$description",
+    "url": "$og_url",
+    "image": "$og_thumbnail",
+    "datePublished": "$date_published",
+    "dateModified": "$date_modified",
+    "author": [
+      {
+        "@type": "Person",
+        "name": "$author_name",
+        "url": "$author_url"
+      }
+    ],
+    "publisher": {
+      "@type": "Organization",
+      "name": "$org_name",
+      "url": "$org_url"
+    }
+  }
+</script>
+
+</head>';
+      sub_filter_once off;
+    }
+
+    error_page   500 502 503 504  /50x.html;
+    location = /50x.html {
+      root   /usr/local/openresty/nginx/html;
+    }
+  }
+}

@@ -1,0 +1,33 @@
+lens_network: lens_net
+
+# DNS Server
+lens_resolver: "192.168.1.1"
+
+lens_backend_port: 30305
+
+lens_frontend_port: 80
+
+lens_api_port: 8080
+lens_redis_port: 6379
+lens_mongo_port: 27017
+
+lens_hostname: "lens-backend"
+lens_proxy_scheme: https://
+
+lens_public_api_url: "https://{{ vault_lensapi_domain }}/"
+
+lens_backend_image: docker.io/amrit3701/lens:backend-1.1.0
+lens_frontend_image: docker.io/amrit3701/lens:frontend-1.1.0
+lens_api_image: docker.io/amrit3701/lens:fc-worker-api-1.1.0
+lens_celery_image: docker.io/amrit3701/lens:fc-worker-celery-1.1.0
+lens_mongo_image: docker.io/mongo:8.2.5
+lens_redis_image: docker.io/valkey/valkey:9.0.2
+
+matomo_port: 80
+
+matomo_image: docker.io/matomo:5.7.1-apache
+matomo_db_image: docker.io/mariadb:11
+
+matomo_db_name: matomo
+matomo_db_user: matomo
+matomo_db_password: "{{ vault_matomo_db_password }}"
